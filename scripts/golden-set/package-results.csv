@@ -1,0 +1,35 @@
+# Enter the PACKAGE's figures (pounds, decimals ok). Leave a cell blank to skip it.
+# income_tax = income tax on all income EXCL the Child Benefit charge (savings + dividends included).
+# hicbc      = High Income Child Benefit Charge (0 if no children).
+# class4     = Class 4 NIC.   total = total tax + NIC due (Class 2 £0, no student loan / CIS).
+scenario,income_tax,hicbc,class4,total
+G01,,,1045.80,4531.80
+G02,,,2456.60,13888.60
+G03,,,1045.80,4528.62
+G04,,,205.80,891.80
+G05,,,1045.80,4731.80
+G06,,,25.80,197.80
+G07,,,2456.60,14488.60
+G08,,,3856.60,49459.60
+G09,,,1045.80,4728.62
+G10,,,2245.80,13059.60
+G11,,,1020.00,4638.75
+G12,,,1945.80,13820.54
+G13,,,1945.80,14248.34
+G14,,,3656.60,55465.01
+G15,,,0,606.37
+G16,,,,168.87
+G17,,,0,168.87
+G18,,,0,0
+G19,,,0,168.87
+G20,,,1945.80,10120.54
+G21,,,3256.60,33488.60
+G22,,,3456.60,42094.85
+G23,,,3264.94,30946.94
+G24,,338,2556.60,16326.60
+G25,,1688,2656.60,21295.35
+G26,,3148,2956.60,27536.60
+G27,,,2456.60,11942.60
+G28,,405,2656.60,17243.60
+G29,,,2245.80,10684.60
+G30,,2070,2756.60,26221.65

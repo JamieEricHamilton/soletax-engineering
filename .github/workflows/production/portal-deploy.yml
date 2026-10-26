@@ -1,0 +1,93 @@
+# Deploy the web portal (<PORTAL_HOST>) on any push to main that touches
+# portal/. Build = typecheck + Vite bundle (the portal has its own package.json
+# and tsconfig — root CI's tsc/lint exclude it). Same Cloudflare token as the
+# website deploy; a separate Pages project keeps the origins, CSPs and deploy
+# blast radii isolated (the S214 portal ruling).
+name: Portal deploy
+
+on:
+  push:
+    branches: [main]
+    # The workflow file itself is in the paths: a build-step change must
+    # exercise the deploy it changes, not wait for the next portal/ commit.
+    paths: ["portal/**", ".github/workflows/portal-deploy.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: portal-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Whole-job ceiling — a normal run is ~4 min; anything past 20 is a hang,
+    # and an unbounded hang bills CI minutes for hours (two 25-min Playwright
+    # stalls on 19 Aug 2026 prompted this).
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci
+      # The portal imports the shared ../src modules (tax engine, dashboard
+      # derivations). Two things those files resolve by walking UP into the
+      # REPO ROOT's node_modules — present locally, absent in this clean
+      # portal-only install:
+      #  1. their bare `date-fns` import (mirror the portal's own copy up;
+      #     the bundle still pins the portal copy via resolve.dedupe), and
+      #  2. the root tsconfig.json's `extends: "expo/tsconfig.base"`, which
+      #     vite's per-file tsconfig discovery loads when transforming ../src
+      #     (stub it — the shared tree has no JSX/classes, so the flags are
+      #     inert; esbuild only needs the extends chain to RESOLVE).
+      # A new bare import in the shared tree must be added HERE and to
+      # portal/package.json.
+      - name: Shared-tree resolution stubs at the repo root
+        working-directory: .
+        run: |
+          mkdir -p node_modules/expo
+          cp -R portal/node_modules/date-fns node_modules/date-fns
+          cp -R portal/node_modules/xlsx node_modules/xlsx
+          cp -R portal/node_modules/fflate node_modules/fflate
+          printf '{"name":"expo","version":"0.0.0-ci-tsconfig-stub"}' > node_modules/expo/package.json
+          printf '{"compilerOptions":{"jsx":"react-jsx","useDefineForClassFields":true}}' > node_modules/expo/tsconfig.base.json
+      # The design-parity gate — off-scale counts only go down; see docs/design/design_system.md §1b
+      - name: Portal source census (design-parity ratchet)
+        working-directory: .
+        run: node portal/scripts/source-census.mjs --check
+      - run: npm run build
+      # ── The deploy gate (hardening D2, S218): a broken portal build must
+      # never reach <PORTAL_HOST> on typecheck alone. Three layers, all
+      # credential-light by design (no Management API token in Actions — the
+      # standing rule):
+      #  1. the CORS keystone (static, repo-root — browser-called functions
+      #     wrap withCors, exact-origin allowlist);
+      #  2. portal-deploy-gate.mjs — Playwright over `vite preview` of the
+      #     BUILT dist: dist secret hygiene, logged-out render, an ANONYMOUS
+      #     session (the shipped publishable key) seeding own-row data and
+      #     pinning every route + the remote_flags read, zero console errors;
+      #  3. chat composer present but never submitted — no model calls here.
+      # The richer census + verify sweep stay local rituals (they mint
+      # magiclink QA users via the Management API and exercise streaming).
+      - name: CORS keystone
+        working-directory: .
+        run: npx --yes tsx scripts/test-portal-cors.ts
+      - name: Install Playwright chromium
+        # ⚠ Hung twice 19 Aug 2026 (25+ min on a ~1-min step — runner-side
+        # apt/CDN stall). Fail fast instead: the CI auto-retry workflow
+        # re-runs a failed deploy, and cancel-in-progress means a re-push
+        # never queues behind a hung run.
+        timeout-minutes: 6
+        run: npx playwright install --with-deps chromium
+      - name: Portal deploy gate (built dist, anonymous session)
+        run: node scripts/portal-deploy-gate.mjs
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 pages deploy dist --project-name=<PAGES_PROJECT_PORTAL> --branch=main

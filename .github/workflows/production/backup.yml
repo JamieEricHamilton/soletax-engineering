@@ -1,0 +1,173 @@
+# Nightly encrypted backup: Postgres (public schema + auth data) + Storage
+# objects (receipts, income) → age-encrypted tarball → Cloudflare R2.
+# PLUS (2026-07-21, S178 — the mirror): a git bundle of the ENTIRE repo (full
+# history, every ref) → age-encrypted → the same bucket, so GitHub + the Mac
+# dying together still leaves the whole company recoverable from R2 +
+# 1Password. Restore checklist: docs/security/runbooks.md §6. Bundle
+# retention: dailies live 7 days, Sunday bundles ride the 35-day prune
+# (~12 × ~600MB ≈ pennies/month). The bundle holds COMMITTED state only —
+# secrets never enter git, so a bundle can't leak them (and a restore
+# re-enters them from 1Password; inventory = security/surface.ts).
+#
+# Design + risk analysis: docs/security/runbooks.md §5. Key facts:
+# - DB access = backup_reader (read-only: pg_read_all_data + BYPASSRLS,
+#   writes proven refused). NOT the postgres password.
+# - Connects via the IPv4 session pooler (GitHub runners have no IPv6;
+#   db.<ref>.supabase.co is IPv6-only). Port 5432 = session mode — pg_dump
+#   cannot run through the 6543 transaction pooler.
+# - Encryption: age, public key only (below — not a secret). The private key
+#   never leaves .env.local + Jamie's password manager; nothing in GitHub or
+#   R2 can decrypt a backup.
+# - Retention: 35 days, pruned here. Restore procedure: scripts/backup-db.sh
+#   header (rehearsed 2026-07-08, content-identical proof).
+# - HEALTHCHECK_URL (healthchecks.io) is the external dead-man's switch: it
+#   alerts on ABSENCE of the nightly ping, so it catches every failure mode
+#   including GitHub silently disabling this cron (60-day-inactivity rule).
+name: nightly-backup
+# Two tiers (S218 hardening B3 — RPO 24h → 6h): the 03:00 run is the FULL
+# nightly (repo bundle + DB + storage buckets + prune — unchanged), and the
+# 09/15/21 runs are DB-ONLY top-ups landing as separate soletax-db-* objects
+# with their own 2-day retention, so an intraday corruption always has a
+# same-day restore point BEHIND it (a shared filename would overwrite the
+# morning's good state). The name stays "nightly-backup" — environment.md C12
+# and the healthchecks dead-man reference it; the ping fires on every tier
+# (the healthchecks period stays 1 day — absence still caught within a day).
+on:
+  schedule:
+    - cron: "0 3 * * *" # full
+    - cron: "0 9,15,21 * * *" # db-only top-up
+  workflow_dispatch:
+
+env:
+  AGE_PUBLIC_KEY: <AGE_PUBLIC_KEY>
+  SUPABASE_REF: <SUPABASE_PROJECT_REF>
+  R2_BUCKET: <R2_BACKUP_BUCKET>
+  RETENTION_DAYS: "35"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mode (full nightly vs db-only top-up)
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 9,15,21 * * *" ]; then
+            echo "MODE=topup" >> "$GITHUB_ENV"
+          else
+            echo "MODE=full" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: env.MODE == 'full'
+        with:
+          fetch-depth: 0 # full history — the bundle IS the repo mirror
+          path: repo
+
+      - name: Install postgresql-client-17, age, rclone
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17 age rclone
+
+      - name: Bundle the repo (the mirror — full history, every ref)
+        if: env.MODE == 'full'
+        run: |
+          STAMP="$(date -u +%Y-%m-%d)"
+          git -C repo bundle create "../soletax-repo-$STAMP.bundle" --all
+          git -C repo bundle verify "../soletax-repo-$STAMP.bundle"
+          age -r "$AGE_PUBLIC_KEY" -o "soletax-repo-$STAMP.bundle.age" "soletax-repo-$STAMP.bundle"
+          rm -f "soletax-repo-$STAMP.bundle"
+          test -s "soletax-repo-$STAMP.bundle.age"
+          echo "REPO_ARTIFACT=soletax-repo-$STAMP.bundle.age" >> "$GITHUB_ENV"
+
+      - name: Dump database (read-only role, session pooler)
+        env:
+          PGPASSWORD: ${{ secrets.BACKUP_READER_PASSWORD }}
+        run: |
+          CONN="host=<SUPABASE_POOLER_HOST> port=5432 dbname=postgres user=backup_reader.$SUPABASE_REF sslmode=require"
+          mkdir -p work/db
+          /usr/lib/postgresql/17/bin/pg_dump "$CONN" --schema=public -Fc -f work/db/prod_public.dump
+          /usr/lib/postgresql/17/bin/pg_dump "$CONN" --schema=auth --data-only --column-inserts \
+            --on-conflict-do-nothing --exclude-table=auth.schema_migrations \
+            -f work/db/prod_auth_data.sql
+          test -s work/db/prod_public.dump && test -s work/db/prod_auth_data.sql
+
+      - name: Sync storage buckets (receipts, income)
+        if: env.MODE == 'full'
+        # RCLONE_S3_* env vars, NOT an inline connection string — the `://` in
+        # the endpoint URL breaks rclone's connection-string parser (proven in
+        # run 28890648933; env-var form proven locally 2026-07-07).
+        env:
+          RCLONE_S3_PROVIDER: Other
+          RCLONE_S3_REGION: eu-west-1
+          RCLONE_S3_ENDPOINT: https://<SUPABASE_PROJECT_REF>.storage.supabase.co/storage/v1/s3
+          RCLONE_S3_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          RCLONE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          mkdir -p work/storage
+          for BUCKET in receipts income; do
+            rclone copy ":s3:$BUCKET" "work/storage/$BUCKET" --transfers 8 --checksum
+          done
+
+      - name: Encrypt
+        run: |
+          if [ "$MODE" = "full" ]; then
+            ARTIFACT="soletax-backup-$(date -u +%Y-%m-%d).tar.gz.age"
+          else
+            ARTIFACT="soletax-db-$(date -u +%Y-%m-%dT%H%M).tar.gz.age"
+          fi
+          tar -czf - -C work . | age -r "$AGE_PUBLIC_KEY" -o "$ARTIFACT"
+          rm -rf work
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Upload to R2 + prune old backups
+        # NO_CHECK_BUCKET: the R2 token is bucket-scoped, so rclone's implicit
+        # HeadBucket/CreateBucket pre-check 403s without it (proven locally).
+        env:
+          RCLONE_S3_PROVIDER: Cloudflare
+          RCLONE_S3_NO_CHECK_BUCKET: "true"
+          RCLONE_S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          RCLONE_S3_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_S3_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          rclone copyto "$ARTIFACT" ":s3:$R2_BUCKET/$ARTIFACT"
+          if [ "$MODE" = "full" ]; then
+            rclone copyto "$REPO_ARTIFACT" ":s3:$R2_BUCKET/$REPO_ARTIFACT"
+          fi
+          # native/** is exempt from retention: backup:native runs only after
+          # native changes, so its latest archive may legitimately be months
+          # old — age-based pruning would delete the only copy.
+          # soletax-db-* top-ups are short-lived BY DESIGN (2 days): they are
+          # intraday corruption-recovery points; the 03:00 full is the record.
+          rclone delete ":s3:$R2_BUCKET" --min-age 2d --include "soletax-db-*"
+          if [ "$MODE" != "full" ]; then
+            rclone lsl ":s3:$R2_BUCKET" | tail -4
+            exit 0
+          fi
+          rclone delete ":s3:$R2_BUCKET" --min-age "${RETENTION_DAYS}d" --exclude "native/**" --exclude "soletax-db-*"
+          # Repo-bundle inner retention: dailies live 7 days; Sunday bundles
+          # ride the 35-day whole-bucket prune above. --files-only: lsf also
+          # lists directories (native/), which are not parseable filenames.
+          rclone lsf ":s3:$R2_BUCKET" --files-only --include "soletax-repo-*.bundle.age" | while read -r f; do
+            d="${f#soletax-repo-}"; d="${d%.bundle.age}"
+            ts=$(date -u -d "$d" +%s 2>/dev/null) || continue
+            age_days=$(( ( $(date -u +%s) - ts ) / 86400 ))
+            dow=$(date -u -d "$d" +%u)
+            if [ "$age_days" -gt 7 ] && [ "$dow" != "7" ]; then
+              rclone deletefile ":s3:$R2_BUCKET/$f"
+            fi
+          done
+          rclone lsl ":s3:$R2_BUCKET" | tail -8
+
+      - name: Dead-man's switch ping
+        if: success()
+        run: |
+          if [ -n "${{ secrets.HEALTHCHECK_URL }}" ]; then
+            curl -fsS -m 10 --retry 3 "${{ secrets.HEALTHCHECK_URL }}" > /dev/null
+          else
+            echo "HEALTHCHECK_URL not set — external dead-man's switch not armed yet"
+          fi

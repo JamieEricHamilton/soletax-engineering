@@ -1,0 +1,122 @@
+# Nightly read-only data-invariant sweep over prod (E1, S218 resilience
+# hardening — the S217 orphan-check made standing).
+#
+# One SQL round trip as backup_reader (the nightly backup's read-only role —
+# no new secrets) proves the invariants no code path should be able to break:
+# fk-orphans, trip sibling duplicates, invoice-number duplicates, future sync
+# stamps (LWW poisoning), negative values, time inversions — plus a watch
+# tier (anon-held records, settingsless uids, giant values) that surfaces
+# only when a count grows. Findings ride the 06:00 briefing; a hard break
+# reds the run and opens the tracking issue.
+#
+# Run it locally any time: node scripts/data-invariants.mjs --dry
+name: Data invariants
+
+on:
+  schedule:
+    - cron: "45 5 * * *" # FALLBACK — the fleet clock (workers/fleet-clock) dispatches at 05:45 sharp; this rescues a dead clock (late, not lost)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # The Cloudflare fleet clock (workers/fleet-clock) dispatches this workflow
+  # at its beat; the schedule trigger above is the FALLBACK (GitHub cron is
+  # best-effort and can run hours late). A scheduled run steps back when the
+  # clock's dispatch already ran — or is running — today. A guard that itself
+  # breaks lets the run through: fail-open, a duplicate beats a missed sweep.
+  fallback-guard:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          today=$(date -u +%F)
+          n=$(gh api "repos/${{ github.repository }}/actions/workflows/data-invariants.yml/runs?created=%3E%3D${today}T00:00:00Z&per_page=30" \
+            --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select(.status == "queued" or .status == "in_progress" or .conclusion == "success")] | length' || echo 0)
+          echo "skip=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: [fallback-guard]
+    if: always() && (needs.fallback-guard.result != 'success' || needs.fallback-guard.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Run the sweep
+        id: check
+        continue-on-error: true # findings must still be committed on red
+        env:
+          BACKUP_READER_PASSWORD: ${{ secrets.BACKUP_READER_PASSWORD }}
+          # Growth census RC leg (portal_live_plan §2.1): a DEDICATED fleet-tier
+          # RevenueCat v2 read key — never the Mac's soletax-mac-read key
+          # (environment.md C20 custody). Until minted this is empty and the
+          # census runs SQL-only, which it says out loud (rc: "no-key").
+          REVENUECAT_FLEET_KEY: ${{ secrets.REVENUECAT_FLEET_KEY }}
+        run: node scripts/data-invariants.mjs
+      - name: Commit fleet findings
+        run: |
+          git config user.name "soletax-fleet"
+          git config user.email "<FLEET_EMAIL>"
+          git add fleet/findings fleet/ledger
+          if git diff --cached --quiet; then
+            echo "no findings change"
+          else
+            git commit -m "chore(fleet): data-invariants findings"
+            # Push-race retry (S203): shared-main pushers can collide within seconds.
+            n=0
+            git pull --rebase
+            until git push; do
+              n=$((n+1)); [ "$n" -ge 5 ] && exit 1
+              sleep $((RANDOM % 5 + 2))
+              git pull --rebase
+            done
+          fi
+      - name: Open tracking issue on failure
+        if: steps.check.outcome == 'failure' || failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const title = "Data-invariant sweep failing";
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "data-invariants",
+            });
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (open.data.some((i) => i.title === title)) {
+              const issue = open.data.find((i) => i.title === title);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Still failing: ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, labels: ["data-invariants"],
+                body: [
+                  `The nightly data-invariant sweep found a broken invariant (or could not run): ${runUrl}`,
+                  "",
+                  "Read the run log for which check went red. A hard invariant names its",
+                  "offending rows (table:id) — investigate the write path before touching data,",
+                  "and rehearse any repair SQL on staging first (runbooks §12, npm run staging:ritual).",
+                  "Reproduce locally: node scripts/data-invariants.mjs --dry",
+                  "",
+                  "Close this issue once a manual re-run (Actions → Data invariants → Run workflow) is green.",
+                ].join("\n"),
+              });
+            }
+
+      - name: Surface the check result
+        if: steps.check.outcome == 'failure'
+        run: exit 1

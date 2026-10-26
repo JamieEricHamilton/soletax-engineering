@@ -1,0 +1,41 @@
+# The per-migration RLS backstop (hardening D3, S218): any push that touches a
+# migration re-proves tenant isolation against PROD immediately — the sweep
+# that used to wait for its weekly slot now rides the exact commit that
+# changed the policy surface. (The PRE-prod half is the D1 staging ritual,
+# local: restore → candidate migration → the same sweep on the copy. This
+# workflow is the post-merge half.)
+#
+# Credential-light by design: test-rls-isolation.mjs signs in ANONYMOUSLY and
+# needs only the public anon key — the Management API token stays out of
+# Actions (the standing pentest rule). Each run leaves two anonymous auth
+# users behind (indistinguishable from the app's own — the recorded
+# precedent); every row and storage object is cleaned up.
+name: RLS per-migration
+
+on:
+  push:
+    branches: [main]
+    paths: ["supabase/migrations/**", ".github/workflows/rls-per-migration.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: rls-per-migration
+  cancel-in-progress: false # isolation proofs queue; never cancel one mid-sweep
+
+jobs:
+  rls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+      # The sweep's one dependency — a targeted install beats the full Expo
+      # tree (root npm ci is ~minutes; this is seconds).
+      - run: npm install --no-save --no-package-lock @supabase/supabase-js@2
+      - name: RLS isolation sweep (prod, anonymous clients)
+        env:
+          SOLETAX_TARGET_URL: ${{ secrets.SUPABASE_URL }}
+          SOLETAX_TARGET_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: node scripts/test-rls-isolation.mjs

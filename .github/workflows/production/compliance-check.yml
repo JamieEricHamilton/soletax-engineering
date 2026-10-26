@@ -1,0 +1,72 @@
+name: Compliance check
+
+# Fails the build if any compliance source of truth is overdue for review —
+# SA103F (December cycle) or the tax-estimate rates (April cycle). See
+# scripts/check-compliance-currency.mjs and docs/compliance/COMPLIANCE.md.
+# This is the "fail loud" backstop: even if a reminder is missed, the repo
+# goes red until the review is done and the edition's reviewBy is bumped.
+#
+# ⚠ PATH-FILTERED S187 (2026-07-25, the Actions-budget fix): docs-only and
+# fleet auto-commits (45% of pushes) were paying npm ci + tsc + lint +
+# test:tax for changes those checks cannot see. Ignore-list polarity — the
+# default is RUN; docs/compliance/** is re-included LAST so register/source
+# edits always trigger (last match wins per file).
+#
+# The weekly cron fixes a latent bug the redesign exposed: this gate is
+# DATE-based (reviewBy passing) but was push-only — during a quiet no-push
+# stretch the alarm could never fire at all. Now it fires on activity AND
+# on schedule.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!fleet/**'
+      - '!.claude/**'
+      - '!**.md'
+      - 'docs/compliance/**'
+  pull_request:
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!fleet/**'
+      - '!.claude/**'
+      - '!**.md'
+      - 'docs/compliance/**'
+  schedule:
+    - cron: '0 7 * * 1' # Mondays 07:00 UTC — the date-alarm backstop (after the 06:00 briefing window)
+  workflow_dispatch: {}
+
+# A superseded push run is moot; the group is keyed by event so a push can
+# never cancel the weekly scheduled backstop.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compliance-currency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Check compliance source is current
+        run: node scripts/check-compliance-currency.mjs
+      # Fast-fail before npm ci: a watched page whose dateline citation lost its
+      # data-src key stalls the daily watch's re-stamp (it did, for 20 days from
+      # 4 September 2026). Runs again inside test:tax; a named step here makes
+      # the red build say what broke.
+      - name: Compliance citation keys
+        run: node scripts/test-compliance-citations.mjs
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Tax engine worked examples
+        run: npm run test:tax

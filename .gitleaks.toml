@@ -1,0 +1,33 @@
+# gitleaks config — security_plan.md Stage 2 (secret scan, CI + local).
+#
+# Baseline audited 2026-07-07 (S120): full 425-commit history scanned; the only
+# findings were the three deliberate public keys allowlisted below. Anything NEW
+# gitleaks finds after this date is a real finding — investigate, never extend
+# this allowlist without the same "public by design" justification.
+#
+# Run locally:  gitleaks detect --redact
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Supabase publishable (anon) key — ships in the client bundle and the website beta form by design; RLS is the security boundary, not key secrecy"
+regexes = ['''sb_publishable_[A-Za-z0-9_-]+''']
+
+[[allowlists]]
+description = "Transistor TSLocationManager licence keys (app.json) — licence tokens, not access credentials; they ship inside Info.plist / the Android manifest of every build by design (order <ORDER_REF>)"
+paths = ['''app\.json''']
+regexes = ['''TSLocationManagerLicense''', '''"license":\s*"eyJ''']
+
+[[allowlists]]
+description = "Keychain item NAMES from the S121 encryption-at-rest work — soletax.mmkv.* are lookup labels for where the real key lives (secureStorage.ts, and docs quoting them), not credentials; generic-api-key false-positives on the word 'encryption-key' (triaged 2026-07-07, S122)"
+regexTarget = "line"
+regexes = ['''soletax\.mmkv\.[a-z0-9.<>-]+\.v1''']
+
+[[allowlists]]
+description = "Pentest dummy ciphertext (base64 of 'pentest-ciphertext') — planted by scripts/hmrc-pentest.mjs T-TK token-table probe as fake row data, not a credential (triaged 2026-07-20, S168)"
+regexes = ['''cGVudGVzdC1jaXBoZXJ0ZXh0''']
+
+[[allowlists]]
+description = "Legal evidence archives — verbatim captures of PUBLIC third-party web pages (docs/legal/*-evidence/). Key-shaped strings inside them are the third party's own public client-side material served to every visitor (e.g. Google Play pages embed Google's public browser API keys in their page JS — the 2026-07-21 gcp-api-key hit). Never our credentials; the captures are fetched from public URLs and kept as dated evidence, so they must stay in history untouched (triaged 2026-07-21)"
+paths = ['''docs/legal/[^/]+-evidence/.*''']

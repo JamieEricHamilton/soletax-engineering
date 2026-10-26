@@ -1,0 +1,121 @@
+# Daily edge-function health check (blind-spot 4, S163 audit).
+#
+# Layer 1: probes every edge function with the anon key — a healthy function
+# answers its own 4xx/3xx; 404/5xx/timeout fails. Layer 2: psql as
+# backup_reader (the nightly backup's read-only role — no new secrets) checks
+# hmrc_submissions for failed submissions in the last 25h, the worst silent
+# failure in the product.
+#
+# Red run → GitHub's failure notification + an open tracking issue (deduped).
+# Run it locally any time: node scripts/edge-health-check.mjs
+name: Edge-function health
+
+on:
+  schedule:
+    - cron: "30 5 * * *" # FALLBACK — the fleet clock (workers/fleet-clock) dispatches at 05:30 sharp; this rescues a dead clock (late, not lost)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # The Cloudflare fleet clock (workers/fleet-clock) dispatches this workflow
+  # at its beat; the schedule trigger above is the FALLBACK (GitHub cron is
+  # best-effort and can run hours late). A scheduled run steps back when the
+  # clock's dispatch already ran — or is running — today. A guard that itself
+  # breaks lets the run through: fail-open, a duplicate beats a missed sweep.
+  fallback-guard:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          today=$(date -u +%F)
+          n=$(gh api "repos/${{ github.repository }}/actions/workflows/edge-health.yml/runs?created=%3E%3D${today}T00:00:00Z&per_page=30" \
+            --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select(.status == "queued" or .status == "in_progress" or .conclusion == "success")] | length' || echo 0)
+          echo "skip=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  health:
+    needs: [fallback-guard]
+    if: always() && (needs.fallback-guard.result != 'success' || needs.fallback-guard.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Run health checks
+        id: check
+        continue-on-error: true # findings must still be committed on red
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          BACKUP_READER_PASSWORD: ${{ secrets.BACKUP_READER_PASSWORD }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }} # the immediate-alert path
+          SENTRY_READ_TOKEN: ${{ secrets.SENTRY_READ_TOKEN }} # F4 ops fact: a dedicated issues:read token, separate from the source-map upload token
+          MAIL_READ_KEY: ${{ secrets.MAIL_READ_KEY }} # B8 (S218): read-only bearer for the Worker /dmarc route — the DMARC rua rollup in section 1c
+        run: node scripts/edge-health-check.mjs
+      - name: Commit fleet findings
+        run: |
+          git config user.name "soletax-fleet"
+          git config user.email "<FLEET_EMAIL>"
+          git add fleet/findings fleet/ledger
+          if git diff --cached --quiet; then
+            echo "no findings change"
+          else
+            git commit -m "chore(fleet): edge-health findings"
+            # Push-race retry (S203): shared-main pushers can collide within seconds
+            # (journo-radar lost to listening-watch on the same beat twice, 2026-08-04).
+            n=0
+            git pull --rebase
+            until git push; do
+              n=$((n+1)); [ "$n" -ge 5 ] && exit 1
+              sleep $((RANDOM % 5 + 2))
+              git pull --rebase
+            done
+          fi
+      - name: Open tracking issue on failure
+        if: steps.check.outcome == 'failure' || failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const title = "Edge-function health check failing";
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "edge-health",
+            });
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (open.data.some((i) => i.title === title)) {
+              const issue = open.data.find((i) => i.title === title);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Still failing: ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, labels: ["edge-health"],
+                body: [
+                  `The daily edge-function health check failed: ${runUrl}`,
+                  "",
+                  "Read the run log for which check went red, then:",
+                  "- boot failure → Supabase dashboard → Edge Functions → logs for that function",
+                  "- failed HMRC submission rows → `hmrc_submissions` (http_status >= 400) — investigate before anything else",
+                  "- reproduce locally: `node scripts/edge-health-check.mjs`",
+                  "",
+                  "Close this issue once a manual re-run (Actions → Edge-function health → Run workflow) is green.",
+                ].join("\n"),
+              });
+            }
+
+      - name: Surface the check result
+        if: steps.check.outcome == 'failure'
+        run: exit 1

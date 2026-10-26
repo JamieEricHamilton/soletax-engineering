@@ -1,0 +1,25 @@
+{
+  "name": "soletax-engineering",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Public engineering showcase for SoleTax: HMRC MTD filing server, tax engine, CI/CD and security model. Scrubbed extracts from the production repo.",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src scripts security",
+    "test": "tsx scripts/test-tax-engine.ts && tsx scripts/test-tax-harness.ts && tsx scripts/test-tax-fuzz.ts && tsx scripts/test-tax-dates.ts && tsx scripts/test-tax-selectors.ts && tsx scripts/test-rule-cards.ts && tsx scripts/test-hmrc-server.ts",
+    "golden:worksheet": "tsx scripts/golden-set/worksheet.ts",
+    "golden:compare": "tsx scripts/golden-set/compare.ts",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "dependencies": { "date-fns": "4.3.0" },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "@typescript-eslint/eslint-plugin": "8.60.1",
+    "@typescript-eslint/parser": "8.60.1",
+    "eslint": "9.39.4",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  }
+}

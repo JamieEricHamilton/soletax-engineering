@@ -1,0 +1,253 @@
+# Security Stage-2 gate (docs/security/security_plan.md §12) — pre-built S120
+# (2026-07-07), ahead of the w/c 24 Aug launch-gate week, so the gate week is a
+# green-check formality instead of a build.
+#
+# ⚠ REDESIGNED S187 (2026-07-25) — the Actions-budget fix. This workflow was
+# eating ~40% of the monthly 3,000 included minutes: 4 jobs on EVERY push (each
+# billed rounded UP to a full minute), and 45% of those pushes were docs-only
+# commits that cannot change code or security surface. Three changes:
+#   1. push/PR triggers are PATH-FILTERED (ignore-list polarity: default is
+#      RUN; only known-inert paths opt out, so a new directory added later is
+#      checked by default, not silently skipped).
+#   2. The secret scan moved to secrets.yml — every push, NO filter (docs
+#      commits are exactly where a pasted credential lands). Here it is
+#      schedule/dispatch-only, feeding the weekly fleet-report.
+#   3. surface-coverage is schedule/dispatch-only here — every push already
+#      runs the same script via test:tax in compliance-check.yml (it was
+#      running twice per push, and this copy paid a full npm ci each time).
+# The Monday full pass is UNCHANGED: all six jobs, RLS, fleet report.
+#
+# Jobs on every code push/PR: the npm-audit baseline gate
+# (scripts/check-npm-audit.mjs — fails on NEW high/critical only; audits BOTH
+# lockfiles, the app at the root and the web portal in portal/, since
+# 2026-10-03 — before that the portal was never audited) and semgrep SAST
+# (rule excludes below each carry the S120 baseline rationale).
+#
+# Weekly + manual: the live RLS isolation test (scripts/test-rls-isolation.mjs,
+# 24 checks against the real Supabase project). ⚠ Jamie, one-time setup: add
+# repo secrets SUPABASE_URL + SUPABASE_ANON_KEY (Settings → Secrets and
+# variables → Actions) — the job skips gracefully until they exist.
+#
+# All actions are SHA-pinned (semgrep's mutable-action-tag finding, fixed at
+# source); Dependabot's github-actions ecosystem keeps the pins fresh.
+#
+# ★ Security is a FLEET MEMBER (F4, 2026-07-20). Two fleet touch-points:
+#   - the gitleaks job emails an alert the moment it goes red on a push/PR
+#     (scripts/security-agent.mjs --alert-secret — detection path, no commit);
+#   - the weekly/dispatch `fleet-report` job turns every gate's result into a
+#     fleet finding and commits it (secret hit = alert, new advisory / SAST /
+#     RLS regression = needs-you, all clean = routine). It is schedule- and
+#     dispatch-only ON PURPOSE: per-push commits would storm main and race the
+#     other fleet bots. Enrolled in fleet/manifest.json as "security".
+name: Security
+
+on:
+  push:
+    # Ignore-list polarity: '**' includes everything, negations opt out known-
+    # inert paths, LAST match wins per file; the workflow runs if any changed
+    # file ends up included. A path not listed here is checked by default.
+    # ⚠ Secret scanning is NOT affected by this filter — secrets.yml runs
+    # gitleaks on every push, docs included.
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!fleet/**'
+      - '!.claude/**'
+      - '!**.md'
+  pull_request:
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!fleet/**'
+      - '!.claude/**'
+      - '!**.md'
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC — weekly full pass incl. RLS + the fleet report
+  workflow_dispatch:
+
+# A superseded push run is moot — the newer commit gets checked. The group is
+# keyed by event so a push can never cancel the weekly scheduled pass.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: Secret scan
+    # Weekly/dispatch only since S187 — the per-push secret scan lives in
+    # secrets.yml (every push, unfiltered). This copy feeds the fleet-report
+    # aggregation on the Monday full pass.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0 # full history — leaks hide in old commits
+      # Fetch and detect are SEPARATE steps (S214, mirrors secrets.yml: a
+      # releases 503 on the download must never read as a secret finding).
+      - name: fetch gitleaks (pinned 8.30.1)
+        run: curl -sSfL --retry 4 --retry-delay 5 --retry-all-errors https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+      - name: gitleaks (allowlist = .gitleaks.toml)
+        id: scan
+        run: ./gitleaks detect --redact
+      # Detection path: the moment a secret is flagged, email the fleet alert.
+      # No commit here (a push carrying a secret must not also race a findings
+      # commit); the weekly fleet-report job records it on the board.
+      - name: Alert the fleet on a secret hit
+        if: failure() && steps.scan.outcome == 'failure'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Send the secret-scan alert
+        if: failure() && steps.scan.outcome == 'failure'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: node scripts/security-agent.mjs --alert-secret
+
+  npm-audit:
+    name: Dependency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # >=22: supabase-js realtime needs native WebSocket
+      # No npm ci, in either directory: npm audit reads package-lock.json
+      # alone (verified 2026-10-03 with no node_modules at the root or in
+      # portal/). The script audits the root and portal/ in turn.
+      - name: npm audit vs recorded baseline (new high/critical fail)
+        run: node scripts/check-npm-audit.mjs
+
+  semgrep:
+    name: SAST
+    runs-on: ubuntu-latest
+    container: semgrep/semgrep:1.168.0
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Excluded rules — S120 baseline, each verified by hand (2026-07-07):
+      #   detected-jwt-token        → the two Transistor licence keys in app.json
+      #                               (ship in every build by design; gitleaks
+      #                               allowlists the same two)
+      #   missing-integrity         → static site is fully same-origin (no CDN);
+      #                               rule also misfires on <link rel=canonical>
+      #   path-join-resolve-traversal → our own build-time config plugins; input
+      #                               is the repo itself, never untrusted
+      #   detect-non-literal-regexp → dev-only eval harness script
+      #   unsafe-formatstring       → console.warn with internal literal params
+      #                               (reportSyncFailure/reportRestoreFailure)
+      - name: semgrep (p/default)
+        run: >
+          semgrep scan --config p/default --error --quiet
+          --exclude ios --exclude android --exclude docs
+          --exclude-rule generic.secrets.security.detected-jwt-token.detected-jwt-token
+          --exclude-rule html.security.audit.missing-integrity.missing-integrity
+          --exclude-rule javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+          --exclude-rule javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
+          --exclude-rule javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring
+
+  surface-coverage:
+    name: Surface coverage
+    # The attack-surface keystone (security/surface.ts + scripts/test-security-
+    # coverage.ts, security_coverage_gate_brief). Discovers the real surface from
+    # the repo and fails when a new edge function / workflow / Worker route / wired
+    # secret / edge-fn egress host / granted table ships unclaimed.
+    # Weekly/dispatch only since S187: every push ALREADY runs this exact script
+    # via test:tax in compliance-check.yml — this job was a per-push duplicate
+    # paying its own npm ci. Zero coverage change: same script, same commit,
+    # the other workflow. Pure filesystem read — no secrets.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Attack-surface coverage gate
+        run: npx tsx scripts/test-security-coverage.ts
+
+  rls-isolation:
+    name: RLS isolation (live)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # >=22: supabase-js realtime needs native WebSocket
+      - name: Check credentials are configured
+        id: creds
+        run: |
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets not set — RLS isolation test skipped (see the header of this workflow)"
+          fi
+      - name: Install dependencies
+        if: steps.creds.outputs.have == 'true'
+        run: npm ci
+      - name: RLS isolation test (24 live checks)
+        if: steps.creds.outputs.have == 'true'
+        run: |
+          printf 'EXPO_PUBLIC_SUPABASE_URL=%s\nEXPO_PUBLIC_SUPABASE_ANON_KEY=%s\n' "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env.local
+          node scripts/test-rls-isolation.mjs
+
+  # The fleet member: turn this pass's gate outcomes into a fleet finding.
+  # Weekly + dispatch only — per-push commits would storm main and race the
+  # other fleet bots. A secret hit was already emailed by the gitleaks job's
+  # detection step; here it is also recorded on the board.
+  fleet-report:
+    name: Fleet report
+    needs: [gitleaks, npm-audit, semgrep, rls-isolation]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    # Read scopes for the GitHub alerts line (2026-10-03): the job's own
+    # GITHUB_TOKEN reads it, so no PAT enters CI. Per GitHub's workflow-syntax
+    # docs, Dependabot alerts need `vulnerability-alerts: read` (NOT
+    # security-events, which is code scanning only); open PRs need
+    # pull-requests: read.
+    permissions:
+      contents: write
+      vulnerability-alerts: read
+      security-events: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Translate gate results into fleet findings
+        continue-on-error: true # the report must never block, and its own commit step must still run
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }} # the immediate-alert path (secret hit / RLS regression)
+          GITHUB_TOKEN: ${{ github.token }} # the GitHub alerts line — read-only scopes above
+        run: |
+          node scripts/security-agent.mjs --report \
+            --gitleaks '${{ needs.gitleaks.result }}' \
+            --npm-audit '${{ needs.npm-audit.result }}' \
+            --semgrep '${{ needs.semgrep.result }}' \
+            --rls '${{ needs.rls-isolation.result }}'
+      - name: Commit fleet findings
+        run: |
+          git config user.name "soletax-fleet"
+          git config user.email "<FLEET_EMAIL>"
+          git add fleet/findings fleet/ledger
+          if git diff --cached --quiet; then
+            echo "no findings change"
+          else
+            git commit -m "chore(fleet): security findings"
+            # Push-race retry (S203): shared-main pushers can collide within seconds
+            # (journo-radar lost to listening-watch on the same beat twice, 2026-08-04).
+            n=0
+            git pull --rebase --autostash
+            until git push; do
+              n=$((n+1)); [ "$n" -ge 5 ] && exit 1
+              sleep $((RANDOM % 5 + 2))
+              git pull --rebase --autostash
+            done
+          fi
