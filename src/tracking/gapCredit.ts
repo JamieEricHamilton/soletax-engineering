@@ -1,5 +1,5 @@
 /**
- * gapCredit.ts — TYPE STUB for the showcase repo.
+ * gapCredit.ts - TYPE STUB for the showcase repo.
  *
  * In the production repo this module (and the rail/line indices it depends on,
  * ~600 KB of transport-network data) implements the mileage gap-credit model.

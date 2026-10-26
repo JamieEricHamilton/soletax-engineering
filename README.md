@@ -1,4 +1,4 @@
-# SoleTax — engineering showcase
+# SoleTax: engineering showcase
 
 SoleTax is a Making Tax Digital (MTD) compliance app for UK sole traders: automatic
 mileage tracking, AI receipt capture, jobs and invoicing, a running tax estimate, and
@@ -6,8 +6,8 @@ direct quarterly filing to HMRC. It is an iOS app (React Native / Expo, on the A
 since September 2026) with a web portal, both backed by Supabase (Postgres, Auth,
 Storage, Deno edge functions) on Cloudflare. It is built and run by one person. This
 repository is a scrubbed, read-only extract of the private production repo so that an
-engineer can read the parts that matter — the HMRC filing server, the tax engine and its
-test suites, the CI/CD workflows and the security model — without the production repo
+engineer can read the parts that matter - the HMRC filing server, the tax engine and its
+test suites, the CI/CD workflows and the security model - without the production repo
 being made public. Everything here is real code from production; what was removed, and
 why, is listed at the end.
 
@@ -193,7 +193,7 @@ Documents: `docs/security/threat_model.md`, `security_plan.md`, `runbooks.md`
   (`hmrc_connections`, `extract_turns`, `server_events`). Storage buckets carry
   owner-only policies. Clients cannot call privileged RPCs (`EXECUTE` revoked).
 - **The RLS proof is empirical, not asserted.** `test-rls-isolation.mjs` signs in two
-  fresh anonymous users with only the anon key — exactly what an attacker has — and has
+  fresh anonymous users with only the anon key - exactly what an attacker has - and has
   B attempt to read, update, delete, spoof-insert and RPC-tunnel into A's rows and
   storage objects. 24 checks. It runs weekly, on every migration merge, and before any
   policy change ships.
@@ -207,8 +207,8 @@ Documents: `docs/security/threat_model.md`, `security_plan.md`, `runbooks.md`
   function secrets live in Supabase; CI secrets in GitHub; admin tokens on one machine.
   gitleaks runs on every push with an allowlist whose every entry carries a
   public-by-design rationale. `test-no-service-role-in-bundle.mjs` runs in CI.
-- **Data minimisation in logs.** `server_events` records status and counts only — never
-  receipt text, images, chat or record bodies — with a 90-day retention job.
+- **Data minimisation in logs.** `server_events` records status and counts only - never
+  receipt text, images, chat or record bodies - with a 90-day retention job.
 - **Backups.** Nightly, encrypted to a key CI cannot decrypt with, EU-resident,
   externally monitored for absence, and restore-rehearsed end to end (row counts,
   policies, indexes, triggers and per-table checksums compared to production).
@@ -251,7 +251,7 @@ with it.
 
 **Receipt extraction** (production only; `scripts/receipt-eval.ts`): every fixture
 receipt runs through the same prompt + parse path the app ships, against the real edge
-function and model pin, scored field by field — amount, date and SA103F category exact,
+function and model pin, scored field by field - amount, date and SA103F category exact,
 merchant fuzzy. Gate: ≥95% all-three and p95 < 3 s. The report prints its own caveat
 that rendered fixtures are not crumpled photos.
 
@@ -271,10 +271,10 @@ filing is the worst outcome in the product.
 
 Debugging a failed submission, in order:
 
-1. **`hmrc_submissions`** — one row per attempt: user, environment, surface, business id,
+1. **`hmrc_submissions`** - one row per attempt: user, environment, surface, business id,
    tax year, period, the exact payload sent, HTTP status, HMRC's `X-CorrelationId`, the
    raw error body, and the mapped outcome kind/code. This usually answers it.
-2. **`server_events`** for that user and `source = 'hmrc-submit'` — the status-and-counts
+2. **`server_events`** for that user and `source = 'hmrc-submit'` - the status-and-counts
    trail around the attempt (refresh, switch evaluation, rate-limit admission, send).
 3. **Supabase function logs** for the invocation, filtered by the correlation id.
 4. If the error is HMRC-side, `hmrcErrors.ts` says what the user saw and whether it was
@@ -311,9 +311,9 @@ All of these are already recorded in the production docs; none is a surprise.
 
 ## How this was built
 
-I am not a professional software engineer by trade. I design the system — the data
+I am not a professional software engineer by trade. I design the system - the data
 model, the trust boundaries, the HMRC contract, what must be true for a filing to be
-safe to send — and build it with Claude Code, session by session, with every decision
+safe to send - and build it with Claude Code, session by session, with every decision
 written down before the code exists. The thing I am most careful about is validation,
 because a fluent wrong answer looks the same as a right one:
 
@@ -340,28 +340,28 @@ occasionally me.
 ## What is in this repo, and what is not
 
 **Included**
-- `.github/workflows/production/` — eight production workflows, identifiers replaced
+- `.github/workflows/production/` - eight production workflows, identifiers replaced
   with placeholders, SHA pins intact. `.github/workflows/ci.yml` is this repo's own gate.
 - `supabase/functions/hmrc-submit/`, `hmrc-oauth-callback/`, `_shared/hmrc*.ts`,
-  `cors.ts`, `rateLimit.ts`, `serverEvents.ts`, `ipScope.ts` — the filing server as
+  `cors.ts`, `rateLimit.ts`, `serverEvents.ts`, `ipScope.ts` - the filing server as
   deployed, minus environment values.
-- `src/tax/` — the whole engine and its README; `src/receipts/`, `src/income/`,
-  `src/lib/`, `src/trips/types.ts` — the types and tables it depends on.
+- `src/tax/` - the whole engine and its README; `src/receipts/`, `src/income/`,
+  `src/lib/`, `src/trips/types.ts` - the types and tables it depends on.
 - `scripts/test-tax-*.ts`, `test-rule-cards.ts`, `test-hmrc-server.ts`,
   `test-security-coverage.ts`, `test-rls-isolation.mjs`, `scripts/golden-set/`.
 - `security/surface.ts`; `docs/security/` (runbooks in a redacted edition); `SECURITY.md`;
   `.gitleaks.toml`.
 
 **Excluded, and why**
-- The app UI, navigation, stores, sync and the portal source — product, not the
+- The app UI, navigation, stores, sync and the portal source - product, not the
   engineering story asked for here.
-- `src/tracking/` — the mileage detection model and ~600 KB of transport-network
+- `src/tracking/` - the mileage detection model and ~600 KB of transport-network
   indices; commercially sensitive. `src/tracking/gapCredit.ts` is a type stub so
   `trips/types.ts` compiles.
-- `claude-extract`, `support-agent` and the other edge functions — prompts and model
+- `claude-extract`, `support-agent` and the other edge functions - prompts and model
   configuration.
-- `docs/compliance/` — the verbatim HMRC source register and correspondence.
-- The 52 other test scripts, evals and simulators — they import the excluded code or
+- `docs/compliance/` - the verbatim HMRC source register and correspondence.
+- The 52 other test scripts, evals and simulators - they import the excluded code or
   call live services.
 - Everything operational from the runbooks: credential names and locations, vendor
   account details, dashboard paths, precedents.
