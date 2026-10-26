@@ -13,7 +13,7 @@
     "golden:compare": "tsx scripts/golden-set/compare.ts",
     "check": "npm run typecheck && npm run lint && npm test"
   },
-  "dependencies": { "date-fns": "4.3.0" },
+  "dependencies": { "date-fns": "4.4.0" },
   "devDependencies": {
     "@types/node": "22.19.0",
     "@typescript-eslint/eslint-plugin": "8.60.1",
