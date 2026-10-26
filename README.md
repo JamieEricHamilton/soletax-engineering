@@ -1,5 +1,7 @@
 # SoleTax: engineering showcase
 
+[![CI](https://github.com/JamieEricHamilton/soletax-engineering/actions/workflows/ci.yml/badge.svg)](https://github.com/JamieEricHamilton/soletax-engineering/actions/workflows/ci.yml) ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white) ![Supabase](https://img.shields.io/badge/Supabase-Postgres%20%2B%20Deno-3ECF8E?logo=supabase&logoColor=white) ![iOS](https://img.shields.io/badge/App%20Store-live-000000?logo=apple&logoColor=white)
+
 SoleTax is a Making Tax Digital (MTD) compliance app for UK sole traders: automatic
 mileage tracking, AI receipt capture, jobs and invoicing, a running tax estimate, and
 direct quarterly filing to HMRC. It is an iOS app (React Native / Expo, on the App Store
@@ -368,4 +370,6 @@ occasionally me.
 - Supabase project refs, hostnames, bucket and Pages project names, email addresses,
   the backup public key, the Sentry DSN, and the names of beta testers and reviewers.
 
-This repo is published for review. The code is not licensed for reuse.
+This repo is published for review. The code is not licensed for reuse (see `LICENSE`).
+The production repo is private; questions about anything here are welcome via the email
+in `SECURITY.md` or a GitHub issue.
